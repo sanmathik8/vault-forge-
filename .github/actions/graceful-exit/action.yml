@@ -1,0 +1,21 @@
+name: "Graceful Exit"
+description: "Prints a clear, actionable failure message and exits the job cleanly"
+inputs:
+  stage:
+    description: "Name of the stage that failed (e.g. Gitleaks, Docker Build, SBOM)"
+    required: true
+  reason:
+    description: "Human-readable explanation of what likely went wrong and what to do"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Print graceful failure message
+      shell: bash
+      run: |
+        echo "::error::🚨 ${{ inputs.stage }} failed!"
+        echo "-------------------------------------------"
+        echo "${{ inputs.reason }}"
+        echo "-------------------------------------------"
+        echo "Pipeline stopping here to prevent insecure code from proceeding."
+        exit 1
