@@ -1,0 +1,91 @@
+name: VaultForge Security Pipeline
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secrets-scan:
+    name: Gitleaks - Secrets Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository for secrets
+        id: gitleaks
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Handle Gitleaks failure
+        if: steps.gitleaks.outcome == 'failure'
+        uses: ./.github/actions/graceful-exit
+        with:
+          stage: "Gitleaks Secrets Scan"
+          reason: "Exposed secrets (API keys, tokens, credentials) were found. Check the logs above for exact file/line, remove the secret, and rotate it if it was ever pushed."
+
+      - name: Confirm pass
+        if: steps.gitleaks.outcome == 'success'
+        run: echo "✅ No secrets detected. Proceeding to next stage."
+
+  build-and-sbom:
+    name: Build Image + Generate SBOM
+    needs: secrets-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        id: docker-build
+        continue-on-error: true
+        run: docker build -t vault-forge-app:${{ github.sha }} ./app
+
+      - name: Handle build failure
+        if: steps.docker-build.outcome == 'failure'
+        uses: ./.github/actions/graceful-exit
+        with:
+          stage: "Docker Build"
+          reason: "Check ./app/Dockerfile for syntax errors, missing dependencies, or broken COPY/RUN instructions."
+
+      - name: Install Syft
+        if: steps.docker-build.outcome == 'success'
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        id: sbom
+        if: steps.docker-build.outcome == 'success'
+        continue-on-error: true
+        run: syft vault-forge-app:${{ github.sha }} -o cyclonedx-json=sbom.json
+
+      - name: Handle SBOM failure
+        if: steps.sbom.outcome == 'failure'
+        uses: ./.github/actions/graceful-exit
+        with:
+          stage: "SBOM Generation"
+          reason: "Syft couldn't scan the built image. Check the image name/tag matches the build step."
+
+      - name: Upload SBOM artifact
+        if: steps.sbom.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.json
+          retention-days: 30
+
+      - name: Confirm pass
+        if: steps.sbom.outcome == 'success'
+        run: echo "✅ SBOM generated and uploaded successfully."
