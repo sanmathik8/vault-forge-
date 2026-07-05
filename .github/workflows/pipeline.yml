@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: security-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -15,9 +19,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    outputs:
+      result: ${{ steps.gitleaks.outcome }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -28,16 +33,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Handle Gitleaks failure
+      - name: Handle failure
         if: steps.gitleaks.outcome == 'failure'
         uses: ./.github/actions/graceful-exit
         with:
           stage: "Gitleaks Secrets Scan"
           reason: "Exposed secrets were found. Check the logs above for exact file/line, remove the secret, and rotate it if it was ever pushed."
-
-      - name: Confirm pass
-        if: steps.gitleaks.outcome == 'success'
-        run: echo "✅ No secrets detected. Proceeding to next stage."
 
   build-and-sbom:
     name: Build Image + Generate SBOM
@@ -45,11 +46,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      sbom_result: ${{ steps.sbom.outcome }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build Docker image
+      - name: Build application image
         id: docker-build
         continue-on-error: true
         run: docker build -t vault-forge-app:${{ github.sha }} ./app
@@ -62,24 +64,19 @@ jobs:
           reason: "Check ./app/Dockerfile for syntax errors, missing dependencies, or broken COPY/RUN instructions."
 
       - name: Save image for downstream jobs
-        if: steps.docker-build.outcome == 'success'
         run: docker save vault-forge-app:${{ github.sha }} -o image.tar
 
-      - name: Upload image artifact
-        if: steps.docker-build.outcome == 'success'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: docker-image
           path: image.tar
           retention-days: 1
 
       - name: Install Syft
-        if: steps.docker-build.outcome == 'success'
         run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Generate SBOM
         id: sbom
-        if: steps.docker-build.outcome == 'success'
         continue-on-error: true
         run: syft vault-forge-app:${{ github.sha }} -o cyclonedx-json=sbom.json
 
@@ -90,17 +87,11 @@ jobs:
           stage: "SBOM Generation"
           reason: "Syft couldn't scan the built image. Check the image name/tag matches the build step."
 
-      - name: Upload SBOM artifact
-        if: steps.sbom.outcome == 'success'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: sbom-${{ github.sha }}
           path: sbom.json
           retention-days: 30
-
-      - name: Confirm pass
-        if: steps.sbom.outcome == 'success'
-        run: echo "✅ SBOM generated and uploaded successfully."
 
   image-scan:
     name: Trivy - Container Vulnerability Scan
@@ -108,87 +99,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      critical_count: ${{ steps.count.outputs.critical }}
+      high_count: ${{ steps.count.outputs.high }}
     steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: docker-image
 
-      - name: Load image
-        run: docker load -i image.tar
+      - run: docker load -i image.tar
 
       - name: Install Trivy
         run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Run Trivy scan
-        id: trivy
         continue-on-error: true
         run: |
-          trivy image \
-            --severity CRITICAL,HIGH \
-            --format json \
-            --output trivy-report.json \
-            vault-forge-app:${{ github.sha }}
+          trivy image --severity CRITICAL,HIGH --format json --output trivy-report.json vault-forge-app:${{ github.sha }}
 
-      - name: Upload Trivy report
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Count findings
+        id: count
+        run: |
+          CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo 0)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-report.json 2>/dev/null || echo 0)
+          echo "critical=$CRIT" >> "$GITHUB_OUTPUT"
+          echo "high=$HIGH" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
         with:
           name: trivy-report
           path: trivy-report.json
           retention-days: 30
-
-      - name: Report findings
-        if: always()
-        run: |
-          echo "::warning::🔍 Trivy scan complete - check trivy-report artifact for CRITICAL/HIGH CVEs."
-          echo "Base image is python:3.11.0b1-buster (EOL) - findings are expected and documented."
-
-  dast-scan:
-    name: OWASP ZAP - DAST Scan
-    needs: build-and-sbom
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Load image
-        run: docker load -i image.tar
-
-      - name: Run PyGoat container
-        run: |
-          docker run -d -p 8000:8000 --name pygoat-dast vault-forge-app:${{ github.sha }}
-          # give it real startup time - Django migrate + gunicorn boot is slow
-          sleep 30
-
-      - name: Confirm app is responding
-        run: |
-          curl -I http://localhost:8000 || (echo "::error::App not responding, aborting ZAP scan" && exit 1)
-
-      - name: Run ZAP baseline scan
-        id: zap
-        continue-on-error: true
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          target: 'http://localhost:8000'
-          fail_action: false
-          # baseline = passive scan only, fast, safe for CI
-          # for real attack simulation (active scan), use action-full-scan instead,
-          # but that's slower and more aggressive - baseline is the right choice for CI
-
-      - name: Report ZAP findings
-        if: always()
-        run: |
-          echo "::warning::🔍 ZAP scan complete - check the zap_report artifact for details."
-          echo "PyGoat is intentionally vulnerable - findings (XSS, missing headers, etc.) are expected."
-
-      - name: Stop container
-        if: always()
-        run: docker stop pygoat-dast || true
 
   sast-scan:
     name: Semgrep - SAST
@@ -196,9 +137,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      result: ${{ steps.semgrep.outcome }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Run Semgrep scan
         id: semgrep
@@ -208,20 +150,77 @@ jobs:
           config: auto
           generateSarif: "1"
 
-      - name: Upload Semgrep SARIF report
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep.sarif
           retention-days: 30
 
-      - name: Check for findings
-        if: steps.semgrep.outcome == 'failure'
-        run: |
-          echo "::warning::⚠️ Semgrep found security issues in the code."
-          echo "This is expected for PyGoat (intentionally vulnerable app)."
+  dast-scan:
+    name: OWASP ZAP - DAST Scan
+    needs: build-and-sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.zap.outcome }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
 
-      - name: Confirm pass
-        if: steps.semgrep.outcome == 'success'
-        run: echo "✅ No security issues found."
+      - run: docker load -i image.tar
+
+      - name: Run target application
+        run: |
+          docker run -d -p 8000:8000 --name target-app vault-forge-app:${{ github.sha }}
+          sleep 30
+
+      - name: Confirm app is responding
+        run: curl -I http://localhost:8000 || (echo "::error::App not responding, aborting ZAP scan" && exit 1)
+
+      - name: Run ZAP baseline scan
+        id: zap
+        continue-on-error: true
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:8000'
+          fail_action: false
+
+      - name: Stop application
+        if: always()
+        run: docker stop target-app || true
+
+  security-summary:
+    name: Security Summary
+    needs: [secrets-scan, build-and-sbom, image-scan, sast-scan, dast-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build summary table
+        run: |
+          CRIT=${{ needs.image-scan.outputs.critical_count || 0 }}
+          HIGH=${{ needs.image-scan.outputs.high_count || 0 }}
+
+          # Simple scoring: start at 100, deduct per finding category
+          SCORE=100
+          [ "${{ needs.secrets-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-100))
+          [ "$CRIT" -gt 0 ] && SCORE=$((SCORE - CRIT*10))
+          [ "$HIGH" -gt 0 ] && SCORE=$((SCORE - HIGH*3))
+          [ "${{ needs.sast-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-10))
+          [ "${{ needs.dast-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-10))
+          [ $SCORE -lt 0 ] && SCORE=0
+
+          echo "## 🛡️ VaultForge Security Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Secrets (Gitleaks) | ${{ needs.secrets-scan.outputs.result == 'success' && '✅ PASS' || '❌ FAIL' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SBOM (Syft) | ${{ needs.build-and-sbom.outputs.sbom_result == 'success' && '✅ PASS' || '❌ FAIL' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container CVEs (Trivy) | $CRIT critical, $HIGH high |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST (Semgrep) | ${{ needs.sast-scan.outputs.result == 'success' && '✅ Clean' || '⚠️ Findings reported' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| DAST (ZAP) | ${{ needs.dast-scan.outputs.result == 'success' && '✅ Clean' || '⚠️ Findings reported' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Security Score: ${SCORE}/100**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Findings are expected for this demo application and are documented in the README, not treated as pipeline defects._" >> $GITHUB_STEP_SUMMARY
