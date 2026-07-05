@@ -91,7 +91,7 @@ jobs:
         run: echo "✅ SBOM generated and uploaded successfully."
 
   sast-scan:
-    name: Bandit - Python SAST
+    name: Semgrep - SAST
     needs: secrets-scan
     runs-on: ubuntu-latest
     permissions:
@@ -100,38 +100,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Bandit
-        run: pip install bandit
-
-      - name: Run Bandit scan
-        id: bandit
+      - name: Run Semgrep scan
+        id: semgrep
         continue-on-error: true
-        run: |
-          bandit -r ./app -f json -o bandit-report.json -ll
-        # -r = recursive, -f json = machine-readable output, -ll = only report medium/high severity
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: auto
+          generateSarif: "1"
 
-      - name: Upload Bandit report
+      - name: Upload Semgrep SARIF report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bandit-report
-          path: bandit-report.json
+          name: semgrep-report
+          path: semgrep.sarif
           retention-days: 30
 
-      - name: Check for critical findings
-        if: steps.bandit.outcome == 'failure'
+      - name: Check for findings
+        if: steps.semgrep.outcome == 'failure'
         run: |
-          echo "::warning::⚠️ Bandit found medium/high severity issues in the code."
+          echo "::warning::⚠️ Semgrep found security issues in the code."
           echo "This is expected for PyGoat (intentionally vulnerable app)."
-          echo "Report uploaded as artifact 'bandit-report' - review before deploying to any real environment."
-          # Note: not exiting 1 here - PyGoat WILL have findings by design,
+          echo "Report uploaded as artifact 'semgrep-report' - review before deploying to any real environment."
+          # Not exiting 1 - PyGoat WILL have findings by design,
           # we want visibility (report) not a hard block for this specific app
 
       - name: Confirm pass
-        if: steps.bandit.outcome == 'success'
-        run: echo "✅ No medium/high severity issues found."
+        if: steps.semgrep.outcome == 'success'
+        run: echo "✅ No security issues found."
