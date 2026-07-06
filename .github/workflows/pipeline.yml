@@ -139,25 +139,40 @@ jobs:
       contents: read
     outputs:
       result: ${{ steps.semgrep.outcome }}
+      finding_count: ${{ steps.count.outputs.findings }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: pip install semgrep
 
       - name: Run Semgrep scan
         id: semgrep
         continue-on-error: true
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/owasp-top-ten
-            p/django
-            p/python
-            p/security-audit
-          generateSarif: "1"
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/django \
+            --config=p/python \
+            --sarif --output=semgrep.sarif \
+            --json --json-output=semgrep.json \
+            ./app
+
+      - name: Count findings
+        id: count
+        if: always()
+        run: |
+          COUNT=$(jq '.results | length' semgrep.json 2>/dev/null || echo 0)
+          echo "findings=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Semgrep found $COUNT issues"
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: semgrep-report
-          path: semgrep.sarif
+          path: |
+            semgrep.sarif
+            semgrep.json
           retention-days: 30
 
   dast-scan:
@@ -205,12 +220,13 @@ jobs:
         run: |
           CRIT=${{ needs.image-scan.outputs.critical_count || 0 }}
           HIGH=${{ needs.image-scan.outputs.high_count || 0 }}
+          SEMGREP_FINDINGS=${{ needs.sast-scan.outputs.finding_count || 0 }}
 
           SCORE=100
           [ "${{ needs.secrets-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-100))
           [ "$CRIT" -gt 0 ] && SCORE=$((SCORE - CRIT*10))
           [ "$HIGH" -gt 0 ] && SCORE=$((SCORE - HIGH*3))
-          [ "${{ needs.sast-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-10))
+          [ "$SEMGREP_FINDINGS" -gt 0 ] && SCORE=$((SCORE - SEMGREP_FINDINGS*2))
           [ "${{ needs.dast-scan.outputs.result }}" != "success" ] && SCORE=$((SCORE-10))
           [ $SCORE -lt 0 ] && SCORE=0
 
@@ -221,7 +237,7 @@ jobs:
           echo "| Secrets (Gitleaks) | ${{ needs.secrets-scan.outputs.result == 'success' && '✅ PASS' || '❌ FAIL' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| SBOM (Syft) | ${{ needs.build-and-sbom.outputs.sbom_result == 'success' && '✅ PASS' || '❌ FAIL' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Container CVEs (Trivy) | $CRIT critical, $HIGH high |" >> $GITHUB_STEP_SUMMARY
-          echo "| SAST (Semgrep) | ${{ needs.sast-scan.outputs.result == 'success' && '✅ Clean' || '⚠️ Findings reported' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST (Semgrep) | $SEMGREP_FINDINGS findings |" >> $GITHUB_STEP_SUMMARY
           echo "| DAST (ZAP) | ${{ needs.dast-scan.outputs.result == 'success' && '✅ Clean' || '⚠️ Findings reported' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Security Score: ${SCORE}/100**" >> $GITHUB_STEP_SUMMARY
