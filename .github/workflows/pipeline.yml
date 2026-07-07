@@ -1,3 +1,5 @@
+cd /mnt/d/vault-forge
+cat > .github/workflows/pipeline.yml << 'EOF'
 name: VaultForge Security Pipeline
 on:
   push:
@@ -191,6 +193,10 @@ jobs:
           echo "" >> trivy-report.md
           echo "</details>" >> trivy-report.md
 
+      - name: Add report to job summary
+        if: always()
+        run: cat trivy-report.md >> $GITHUB_STEP_SUMMARY
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -298,6 +304,10 @@ jobs:
           echo "" >> semgrep-report.md
           echo "</details>" >> semgrep-report.md
 
+      - name: Add report to job summary
+        if: always()
+        run: cat semgrep-report.md >> $GITHUB_STEP_SUMMARY
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -375,7 +385,7 @@ jobs:
               `- Critical container CVEs (Trivy): ${crit_cve}`,
               `- Critical SAST findings (Semgrep): ${crit_sast}`,
               ``,
-              `Full markdown reports (with critical findings in full detail and high/warning findings grouped and collapsible) are attached as workflow artifacts: trivy-report, semgrep-report.`,
+              `Full reports are viewable directly in each job's Summary tab, and attached as workflow artifacts: trivy-report, semgrep-report.`,
               ``,
               `Commit: ${context.sha}`,
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
@@ -416,9 +426,10 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Secrets (Gitleaks) | ${{ needs.secrets-scan.outputs.result == 'success' && 'PASS' || 'FAIL' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| SBOM (Syft) | ${{ needs.build-and-sbom.outputs.sbom_result == 'success' && 'PASS' || 'FAIL' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Container CVEs (Trivy) | $CRIT critical, $HIGH high — see trivy-report artifact |" >> $GITHUB_STEP_SUMMARY
-          echo "| SAST (Semgrep) | $SEMGREP_FINDINGS findings ($SEMGREP_CRIT critical) — see semgrep-report artifact |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container CVEs (Trivy) | $CRIT critical, $HIGH high — full report in that job's Summary tab |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST (Semgrep) | $SEMGREP_FINDINGS findings ($SEMGREP_CRIT critical) — full report in that job's Summary tab |" >> $GITHUB_STEP_SUMMARY
           echo "| DAST (ZAP active scan) | ${{ needs.dast-scan.outputs.result == 'success' && 'Clean' || 'Findings reported' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| CI Runtime (Falco) | See build-and-sbom job summary |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Security Score: ${SCORE}/100**" >> $GITHUB_STEP_SUMMARY
+EOF
