@@ -430,4 +430,3 @@ jobs:
           echo "| CI Runtime (Falco) | See build-and-sbom job summary |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Security Score: ${SCORE}/100**" >> $GITHUB_STEP_SUMMARY
-EOF
