@@ -1,0 +1,31 @@
+replicaCount: 2
+
+image:
+  repository: vault-forge-app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  limits:
+    cpu: 300m
+    memory: 512Mi
+  requests:
+    cpu: 150m
+    memory: 256Mi
+
+startupProbe:
+  path: /
+  periodSeconds: 5
+  failureThreshold: 12   # 12 x 5s = 60s max time allowed to boot
+
+livenessProbe:
+  path: /
+  periodSeconds: 15
+
+readinessProbe:
+  path: /
+  periodSeconds: 10

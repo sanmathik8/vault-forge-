@@ -1,0 +1,7 @@
+VaultForge (PyGoat) has been deployed!
+
+To access the application, run:
+  kubectl port-forward svc/{{ .Release.Name }}-service 8000:{{ .Values.service.port }}
+
+Then open:
+  http://localhost:8000
