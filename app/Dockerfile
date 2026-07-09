@@ -1,12 +1,16 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.10-slim-bookworm
 
 WORKDIR /app
 
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
-        dnsutils \
+        build-essential \
         gcc \
-        libpq-dev && \
+        g++ \
+        libc6-dev \
+        libpq-dev \
+        python3-dev \
+        dnsutils && \
     rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1
