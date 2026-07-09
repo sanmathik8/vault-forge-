@@ -1,5 +1,3 @@
-cd /mnt/d/vault-forge
-cat > .github/workflows/pipeline.yml << 'EOF'
 name: VaultForge Security Pipeline
 on:
   push:
